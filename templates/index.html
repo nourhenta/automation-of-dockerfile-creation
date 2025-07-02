@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Dockerfile Generator</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600&display=swap" rel="stylesheet">
+  <script defer>
+    function showLoading() {
+      document.getElementById("loading").style.display = "flex";
+    }
+
+    function handleRepoInput(e) {
+      const input = e.value;
+      const match = input.match(/github\.com\/([^\/]+)\//);
+
+      if (match) {
+        const username = match[1];
+        document.getElementById("avatar").src = `https://github.com/${username}.png`;
+        document.getElementById("avatar-box").style.display = "block";
+      } else {
+        document.getElementById("avatar-box").style.display = "none";
+      }
+    }
+
+    function handleDrop(e) {
+      e.preventDefault();
+      const file = e.dataTransfer.files[0];
+      if (file && file.name.endsWith('.zip')) {
+        document.getElementById('project_folder').files = e.dataTransfer.files;
+        document.getElementById('drop-label').innerText = file.name;
+      }
+    }
+
+    function allowDrop(e) {
+      e.preventDefault();
+    }
+  </script>
+</head>
+<body>
+  <div class="hero">
+    <div class="overlay">
+      <h1>Dockerfile Generator</h1>
+      <p>Generate and run Docker containers from zipped projects or GitHub repos in one click.</p>
+    </div>
+  </div>
+
+  <div class="container">
+    <form action="/submit" method="post" enctype="multipart/form-data" onsubmit="showLoading()">
+      <label for="project_folder">📦 Upload a zipped project folder (.zip):</label>
+
+      <div class="drop-zone" ondrop="handleDrop(event)" ondragover="allowDrop(event)">
+        <span id="drop-label">Drag & Drop ZIP here or click below</span>
+      </div>
+
+      <input type="file" name="project_folder" id="project_folder" accept=".zip" />
+
+      <div class="divider">OR</div>
+
+      <label for="repo_url">🔗 Paste GitHub Repo URL:</label>
+      <input type="text" name="repo_url" id="repo_url" placeholder="https://github.com/username/repo.git" oninput="handleRepoInput(this)" />
+
+      <div id="avatar-box" style="display: none;">
+        <img id="avatar" src="" alt="GitHub avatar" class="avatar" />
+      </div>
+
+      <label class="checkbox">
+        <input type="checkbox" name="run_container" />
+        🚀 Build and run Docker container after generation
+      </label>
+
+      <button type="submit">Generate Dockerfile</button>
+    </form>
+  </div>
+
+  <div id="loading" class="loading-overlay">
+    <div class="loader"></div>
+    <p>Generating Dockerfile...</p>
+  </div>
+</body>
+</html>

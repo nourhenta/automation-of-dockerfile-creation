@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Dockerfile Generated</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="hero">
+    <div class="overlay">
+      <h1>Dockerfile Ready 🚀</h1>
+      <p>Take a look at your generated Dockerfile below</p>
+    </div>
+  </div>
+
+  <div class="container">
+    {% if github_avatar %}
+      <div style="text-align: center; margin-top: 10px;">
+        <img src="{{ github_avatar }}" alt="GitHub Avatar" class="avatar">
+        <p style="margin-top: 8px;"><strong>GitHub user:</strong> {{ github_user }}</p>
+      </div>
+    {% endif %}
+
+    <h2 style="margin-top: 30px;">📝 Dockerfile Preview</h2>
+    <pre class="dockerfile-box">{{ dockerfile_content }}</pre>
+
+    <p style="margin-top: 20px;">
+      <strong>Download:</strong> <a href="{{ dockerfile_url }}" download>{{ dockerfile_name }}</a>
+    </p>
+
+    {% if container_started %}
+      <p style="color: green;">✅ Container is running on <strong>http://localhost:8080</strong></p>
+    {% endif %}
+
+    <div style="text-align: center; margin-top: 30px;">
+      <a href="{{ url_for('index') }}"><button>🔁 Generate Another</button></a>
+    </div>
+  </div>
+</body>
+</html>
