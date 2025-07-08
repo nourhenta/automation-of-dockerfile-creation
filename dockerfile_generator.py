@@ -1,3 +1,5 @@
+active_containers = []
+
 from flask import Flask, render_template, request, redirect, url_for, send_file
 import os
 import subprocess
@@ -9,6 +11,18 @@ from urllib.parse import urlparse
 from werkzeug.utils import secure_filename
 import xml.etree.ElementTree as ET
 
+PROJECT_PORTS = {
+    'Python Flask': 4000,
+    'Node.js': 3000,
+    '.NET': 5000,
+    'Java Maven': 8080,
+    'Java Gradle': 8081,
+    'Java (manual)': 8082,
+    'React': 80,
+    'Vite JS': 80,
+    'Vanilla JS': 80,
+}
+
 app = Flask(__name__)
 UPLOAD_FOLDER = 'uploads'
 GENERATED_FOLDER = 'generated'
@@ -17,6 +31,55 @@ os.makedirs(GENERATED_FOLDER, exist_ok=True)
 os.makedirs(os.path.join('static', 'generated'), exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['GENERATED_FOLDER'] = GENERATED_FOLDER
+
+def ensure_docker_network_exists(network_name='app-network'):
+    result = subprocess.run(["docker", "network", "ls"], capture_output=True, text=True)
+    if network_name not in result.stdout:
+        subprocess.run(["docker", "network", "create", network_name], check=True)
+
+def generate_nginx_config(containers):
+    config = "events {}\nhttp {\n    server {\n        listen 80;\n"
+    for path, name, port in containers:
+        config += f"""
+        location {path} {{
+            proxy_pass http://{name}:{port};
+            rewrite ^{path}$ / break;
+            rewrite ^{path}/(.*)$ /$1 break;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+        }}
+        """
+    config += "\n    }\n}"
+    return config
+
+def write_nginx_conf_file(containers):
+    config = generate_nginx_config(containers)
+    os.makedirs("nginx", exist_ok=True)
+    with open("nginx/nginx.conf", "w") as f:
+        f.write(config)
+
+def build_and_run_nginx():
+    subprocess.run(["docker", "rm", "-f", "nginx-proxy"], stderr=subprocess.DEVNULL)
+
+    subprocess.run(["docker", "build", "-t", "nginx-proxy", "nginx"], check=True)
+
+    subprocess.run([
+        "docker", "run", "-d",
+        "--name", "nginx-proxy",
+        "--network", "app-network",
+        "-p", "80:80",
+        "nginx-proxy"
+    ], check=True)
+
+    # Check if NGINX container is running
+    status = subprocess.check_output([
+        "docker", "inspect", "-f", "{{.State.Status}}", "nginx-proxy"
+    ]).decode().strip()
+
+    if status != "running":
+        logs = subprocess.check_output(["docker", "logs", "nginx-proxy"]).decode()
+        raise RuntimeError(f"NGINX container failed to start.\nStatus: {status}\nLogs:\n{logs}")
+
 
 def detect_project_type(project_path):
     for root, dirs, files in os.walk(project_path):
@@ -43,6 +106,18 @@ def detect_project_type(project_path):
             return 'Vanilla JS'
 
     return 'Unknown'
+def detect_dotnet_target_framework(project_path):
+    import re
+    for file in os.listdir(project_path):
+        if file.endswith(".csproj"):
+            tree = ET.parse(os.path.join(project_path, file))
+            root = tree.getroot()
+            for tf in root.iter():
+                if 'TargetFramework' in tf.tag:
+                    # Return only version number, e.g., "8.0" from "net8.0"
+                    match = re.search(r"net(\d+\.\d+)", tf.text)
+                    return match.group(1) if match else "8.0"
+    return "8.0"
 
 def detect_dotnet_dll_name(project_path):
     for file in os.listdir(project_path):
@@ -82,7 +157,23 @@ Assume `app.py` exists and contains a valid `Flask` app named `app`.
 """
     elif project_type == '.NET':
         dll_name = detect_dotnet_dll_name(project_path)
-        return base_prompt + f"\n\nProject type: .NET. Use SDK to publish, then run {dll_name}."
+        target_framework = detect_dotnet_target_framework(project_path)
+        return base_prompt + f"""
+Project type: .NET.
+
+Use the appropriate SDK and runtime based on the target framework.
+
+Target Framework: {target_framework}
+DLL Name: {dll_name}
+
+1. Use `mcr.microsoft.com/dotnet/sdk:{target_framework}` as the build image.
+2. Use `mcr.microsoft.com/dotnet/runtime:{target_framework}` as the runtime image.
+3. Copy the `.csproj` file, run `dotnet restore`.
+4. Copy all files and run `dotnet publish -c Release`.
+5. Copy the output DLL to runtime and run with:
+   ENTRYPOINT ["dotnet", "{dll_name}"]
+"""
+
     elif project_type == 'Java Maven':
         return base_prompt + """
 Project type: Java Maven.
@@ -108,31 +199,61 @@ Do **not** expose any ports unless the app is explicitly a web server.
     elif project_type == 'Java (manual)':
         return base_prompt + "\n\nProject type: Plain Java. Compile with javac. Run with java."
     elif project_type == 'React':
-        return base_prompt + "\n\nProject type: React (frontend). Use node:18-alpine to build the app, then serve the static files using nginx. Expose port 80. Use multi-stage builds."
+        
+        return base_prompt + """
+Project type: React (frontend). Use node:18-alpine to build the app, then serve the static files using nginx. Expose port 80. Use multi-stage builds.
+
+Details:
+- First stage: 
+  - Use node:18-alpine
+  - Set WORKDIR to /app
+  - Copy package*.json
+  - Run npm install
+  - Copy the rest of the project
+  - Run npm run build to produce production files
+
+- Second stage:
+  - Use nginx:alpine
+  - Copy the contents of /app/build to /usr/share/nginx/html
+  - Expose port 80
+  - Use CMD ["nginx", "-g", "daemon off;"]
+
+Do not add incorrect CMD lines like `default.conf`. Do not modify NGINX configuration unless explicitly told to.
+"""
     elif project_type == 'Vite JS':
         return base_prompt + """
-Project type: Vite-based JavaScript frontend (React, Vue, or Vanilla JS).
+Project type: Vite-based JavaScript frontend (React, Vue).
 
-Generate a multi-stage Dockerfile with the following requirements:
+Generate a multi-stage Dockerfile with the following:
 
-1. Use `node:18-alpine` as the build stage.
-2. Set `WORKDIR` to `/app`.
-3. Copy `package.json` and `package-lock.json` (if present).
-4. Run `npm install`.
-5. Copy the rest of the project files.
-6. Run `npm run build` to generate the production files in `dist/`.
+1. Builder stage:
+   - Use `node:18-alpine`
+   - WORKDIR `/app`
+   - Copy `package*.json` and run `npm install`
+   - Copy project files and run `npm run build` (output in `/app/dist`)
 
-Then:
-
-7. Use `nginx:1.21.6-alpine` as the final image.
-8. Copy the contents of `/app/dist` into `/usr/share/nginx/html`.
-9. Expose port `80`.
-10. Start NGINX with:
-    CMD ["nginx", "-g", "daemon off;"]
-
-Do **not** include development dependencies or source files in the final image.  
-Assume the build output is inside the `dist/` directory.
+2. Final stage:
+   - Use `nginx:alpine`
+   - WORKDIR `/usr/share/nginx/html`
+   - Copy `/app/dist` into it
+   - Copy a custom `default.conf` to `/etc/nginx/conf.d/default.conf`
+   - Expose port 80
+   - CMD: ["nginx", "-g", "daemon off;"]
 """
+    elif project_type == 'Vanilla JS':
+        return base_prompt + """
+Project type: Vanilla JS.
+
+Generate a Dockerfile that:
+
+1. Uses `nginx:alpine` as the base image.
+2. Copies all HTML, CSS, and JS files from the project folder into `/usr/share/nginx/html`.
+3. Exposes port 80.
+4. Uses: CMD ["nginx", "-g", "daemon off;"]
+
+No Node.js, no npm, no build step.
+"""
+
 
     else:
         return base_prompt + "\n\nProject type: Unknown. Guess based on structure."
@@ -181,8 +302,34 @@ def handle_remove_readonly(func, path, exc_info):
     func(path)
 
 def build_and_run_docker_image(project_path):
-    subprocess.run(['docker', 'build', '-t', 'autogenerated-image', project_path])
-    subprocess.run(['docker', 'run', '-d', '-p', '8080:80', 'autogenerated-image'])
+    project_type = detect_project_type(project_path)
+    port = PROJECT_PORTS.get(project_type, 4000)
+    container_name = f"{project_type.lower().replace(' ', '-').replace('.', '')}-container"
+
+    print(f"🛠 Building image for {project_type} on port {port} as container '{container_name}'")
+
+    subprocess.run(['docker', 'build', '-t', container_name, project_path], check=True)
+    subprocess.run([
+        'docker', 'rm', '-f', container_name
+    ], stderr=subprocess.DEVNULL)
+    subprocess.run([
+        'docker', 'run', '-d',
+        '--name', container_name,
+        '--network', 'app-network',
+        container_name
+    ], check=True)
+
+    # 🔍 Check if the container is running
+    status = subprocess.check_output([
+        "docker", "inspect", "-f", "{{.State.Status}}", container_name
+    ]).decode().strip()
+
+    if status != "running":
+        logs = subprocess.check_output(["docker", "logs", container_name]).decode()
+        raise RuntimeError(f"{container_name} failed to start.\nStatus: {status}\nLogs:\n{logs}")
+
+    return container_name, port
+
 
 @app.route('/')
 def index():
@@ -232,8 +379,17 @@ def submit():
                     f.write(dockerfile_content)
 
                 if run_container:
+                    container_name, container_port = build_and_run_docker_image(project_path)
+                    # Determine path prefix like /flask or /java-maven
+                    prefix = "/" + container_name.replace("-container", "")
+                    active_containers.append((prefix, container_name, container_port))
+
+    
+                    
                     try:
-                        build_and_run_docker_image(project_path)
+                        write_nginx_conf_file(active_containers)
+                        build_and_run_nginx()
+
                     except Exception as e:
                         print(f"⚠️ Docker run failed: {e}")
 
@@ -246,7 +402,8 @@ def submit():
                     container_started=run_container,
                     dockerfile_content=dockerfile_content,
                     github_user=github_user,
-                    github_avatar=github_avatar
+                    github_avatar=github_avatar,
+                    active_containers=active_containers if run_container else []
                 )
 
         return redirect(url_for('index'))
