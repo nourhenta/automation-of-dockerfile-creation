@@ -64,10 +64,25 @@
         <img id="avatar" src="" alt="GitHub avatar" class="avatar" />
       </div>
 
+      
+
+      <label for="image_name">🖼️ Image Name:</label>
+      <input type="text" name="image_name" id="image_name" placeholder="my-react-app" required />
+
+      <label for="replica_count"> Number of Replicas:</label>
+      <input type="number" name="replica_count" id="replica_count" value="1" min="1" required />
+
+
       <label class="checkbox">
         <input type="checkbox" name="run_container" />
         🚀 Build and run Docker container after generation
       </label>
+
+      <label class="checkbox">
+        <input type="checkbox" name="auto_deploy_k8s" />
+        ☸️ Deploy to Kubernetes after manifest generation
+      </label>
+
 
       <button type="submit">Generate Dockerfile</button>
     </form>

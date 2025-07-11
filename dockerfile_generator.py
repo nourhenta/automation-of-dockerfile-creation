@@ -1,7 +1,16 @@
 active_containers = []
 
-from flask import Flask, render_template, request, redirect, url_for, send_file
 import os
+from dotenv import load_dotenv
+load_dotenv()
+DOCKERHUB_USERNAME = os.getenv("DOCKERHUB_USERNAME")
+DOCKERHUB_PASSWORD = os.getenv("DOCKERHUB_PASSWORD")
+          
+IMAGE_NAME = "cat1"               
+TAG = "latest"                          
+
+import textwrap
+from flask import Flask, render_template, request, redirect, url_for, send_file
 import subprocess
 import tempfile
 import git
@@ -10,6 +19,7 @@ import stat
 from urllib.parse import urlparse
 from werkzeug.utils import secure_filename
 import xml.etree.ElementTree as ET
+import re
 
 PROJECT_PORTS = {
     'Python Flask': 4000,
@@ -284,10 +294,7 @@ def extract_dockerfile_only(text):
         valid_instructions = ["FROM", "WORKDIR", "COPY", "RUN", "CMD", "ENTRYPOINT", "ENV", "EXPOSE", "ARG", "LABEL", "#"]
         docker_lines = [line for line in lines if any(line.strip().startswith(i) for i in valid_instructions)]
     return "\n".join(docker_lines)
-def handle_remove_readonly(func, path, exc_info):
-    # Change the file to writable and retry deletion
-    os.chmod(path, stat.S_IWRITE)
-    func(path)
+
 
 def clone_repo(url, target):
     target = os.path.normpath(target)
@@ -307,17 +314,26 @@ def build_and_run_docker_image(project_path):
     container_name = f"{project_type.lower().replace(' ', '-').replace('.', '')}-container"
 
     print(f"🛠 Building image for {project_type} on port {port} as container '{container_name}'")
+    print(f"📦 Running container with: docker run -d --name {container_name} --network app-network {container_name}")
 
     subprocess.run(['docker', 'build', '-t', container_name, project_path], check=True)
     subprocess.run([
         'docker', 'rm', '-f', container_name
     ], stderr=subprocess.DEVNULL)
-    subprocess.run([
-        'docker', 'run', '-d',
-        '--name', container_name,
-        '--network', 'app-network',
-        container_name
-    ], check=True)
+    try:
+        subprocess.run([
+            'docker', 'run', '-d',
+            '--name', container_name,
+            '--network', 'app-network',
+            container_name
+        ], check=True)
+    except FileNotFoundError as e:
+        print(f"❌ docker not found: {e.filename}")
+        raise
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Docker run failed: {e}")
+        raise
+
 
     # 🔍 Check if the container is running
     status = subprocess.check_output([
@@ -342,6 +358,13 @@ def submit():
         repo_url = request.form.get('repo_url')
         uploaded_file = request.files.get('project_folder')
         run_container = request.form.get('run_container') == 'on'
+        auto_deploy_k8s = request.form.get('auto_deploy_k8s') == 'on'
+        image_name = request.form.get('image_name', 'react-app').strip()
+        replica_count = request.form.get('replica_count', 1)
+   
+        image_name = image_name.lower()
+        image_name = re.sub(r'[^a-z0-9._-]', '', image_name)
+
         project_path = None
         github_user = None
         github_avatar = None
@@ -369,33 +392,115 @@ def submit():
             project_path = repo_path
 
         if project_path:
-                project_type = detect_project_type(project_path)
-                prompt = build_prompt(project_type, project_path)
-                response = run_llama(prompt)
-                dockerfile_content = extract_dockerfile_only(response)
+            project_type = detect_project_type(project_path)
+            prompt = build_prompt(project_type, project_path)
+            response = run_llama(prompt)
+            dockerfile_content = extract_dockerfile_only(response)
 
-                dockerfile_path = os.path.join(project_path, 'Dockerfile')
-                with open(dockerfile_path, 'w') as f:
-                    f.write(dockerfile_content)
+            dockerfile_path = os.path.join(project_path, 'Dockerfile')
+            with open(dockerfile_path, 'w') as f:
+                f.write(dockerfile_content)
 
+            # 🆕 Generate Kubernetes manifest if it's a React project
+            if project_type == 'React':
+                manifest = textwrap.dedent(f"""
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {image_name}-deployment
+spec:
+  replicas: {replica_count}
+  selector:
+    matchLabels:
+      app: {image_name}
+  template:
+    metadata:
+      labels:
+        app: {image_name}
+    spec:
+      containers:
+      - name: {image_name}
+        image: {DOCKERHUB_USERNAME}/{image_name}:latest
+        ports:
+        - containerPort: 4000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {image_name}-service
+spec:
+  type: NodePort
+  selector:
+    app: {image_name}
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+      nodePort: 30036
+""")
+                manifest_path = os.path.join(project_path, f"{image_name}-manifest.yaml")
+                with open(manifest_path, "w") as f:
+                    f.write(manifest)
+
+                shutil.copy(manifest_path, os.path.join('static', 'generated', os.path.basename(manifest_path)))
+
+                # 🐳 Build, tag, login, and push image to Docker Hub
+                full_image = f"{DOCKERHUB_USERNAME}/{image_name}:latest"
+
+                try:
+                    print(f"👉 Building Docker image: {full_image}")
+                    subprocess.run(['docker', 'build', '-t', full_image, project_path], check=True)
+
+                    print("🔐 Logging in to Docker Hub...")
+                    subprocess.run(['docker', 'login', '-u', DOCKERHUB_USERNAME, '-p', DOCKERHUB_PASSWORD], check=True)
+
+
+                    print("📤 Pushing image to Docker Hub...")
+                    subprocess.run(['docker', 'push', full_image], check=True)
+
+                except FileNotFoundError as e:
+                    print(f"❌ File not found: {e.filename}")
+                    raise
+                except subprocess.CalledProcessError as e:
+                    print(f"❌ Subprocess failed: {e}")
+                    raise
+
+                # 🐳 Optional: Run the container locally and expose it via NGINX
                 if run_container:
                     container_name, container_port = build_and_run_docker_image(project_path)
-                    # Determine path prefix like /flask or /java-maven
+                    image_name = container_name
+                    if not full_image.startswith("nono10/"):
+                        subprocess.run(["minikube", "image", "load", container_name], check=True)
+                    else:
+                        print(f"📦 Skipping `minikube image load` since image is on Docker Hub: {full_image}")
+
+
                     prefix = "/" + container_name.replace("-container", "")
                     active_containers.append((prefix, container_name, container_port))
+                    write_nginx_conf_file(active_containers)
+                    build_and_run_nginx()
 
-    
-                    
+                # ☸️ Apply Kubernetes manifest if requested
+                if auto_deploy_k8s and manifest_path:
+                    print(f"📝 Checking if manifest exists at: {manifest_path}")
+                    print("✅ Exists:", os.path.exists(manifest_path))
+
                     try:
-                        write_nginx_conf_file(active_containers)
-                        build_and_run_nginx()
+                        apply_result = subprocess.run(
+                            ["kubectl", "apply", "-f", manifest_path],
+                            capture_output=True, text=True
+                        )
+                        print("📦 K8s Apply Output:", apply_result.stdout)
+                        print("⚠️ K8s Apply Errors:", apply_result.stderr)
+                    except FileNotFoundError as e:
+                        print(f"❌ kubectl not found: {e.filename}")
+                        raise
 
-                    except Exception as e:
-                        print(f"⚠️ Docker run failed: {e}")
-
+                # 📄 Copy Dockerfile to public folder for download
                 public_path = os.path.join('static', 'generated', os.path.basename(dockerfile_path))
                 shutil.copy(dockerfile_path, public_path)
 
+                # ✅ Final render
                 return render_template('success.html',
                     dockerfile_name=os.path.basename(dockerfile_path),
                     dockerfile_url=url_for('static', filename=f'generated/{os.path.basename(dockerfile_path)}'),
@@ -403,8 +508,11 @@ def submit():
                     dockerfile_content=dockerfile_content,
                     github_user=github_user,
                     github_avatar=github_avatar,
-                    active_containers=active_containers if run_container else []
+                    active_containers=active_containers if run_container else [],
+                    manifest_name=os.path.basename(manifest_path) if manifest_path else "",
+                    manifest_url=url_for('static', filename=f'generated/{os.path.basename(manifest_path)}') if manifest_path else "",
                 )
+
 
         return redirect(url_for('index'))
 
