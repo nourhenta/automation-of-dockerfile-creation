@@ -27,12 +27,22 @@
     <p style="margin-top: 20px;">
       <strong>Download:</strong> <a href="{{ dockerfile_url }}" download>{{ dockerfile_name }}</a>
     </p>
+    <h2 style="margin-top: 30px;">📄 Kubernetes Manifest</h2>
+    <p>
+      <strong>Download:</strong> <a href="{{ manifest_url }}" download>{{ manifest_name }}</a>
+    </p>
+
 
     {% if container_started and active_containers %}
     <p style="color: green;">
         ✅ Container is running at <strong>http://localhost{{ active_containers[-1][0] }}</strong>
     </p>
     {% endif %}
+
+    {% if auto_deploy_k8s %}
+      <p style="color: green;">✅ App was deployed to your Kubernetes cluster (Minikube)</p>
+    {% endif %}
+
 
 
     <div style="text-align: center; margin-top: 30px;">
