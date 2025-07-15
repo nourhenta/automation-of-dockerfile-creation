@@ -8,7 +8,7 @@ DOCKERHUB_PASSWORD = os.getenv("DOCKERHUB_PASSWORD")
           
 IMAGE_NAME = "cat1"               
 TAG = "latest"                          
-
+from datetime import datetime
 import textwrap
 from flask import Flask, render_template, request, redirect, url_for, send_file
 import subprocess
@@ -408,6 +408,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {image_name}-deployment
+  namespace: cat
 spec:
   replicas: {replica_count}
   selector:
@@ -428,6 +429,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: {image_name}-service
+  namespace: cat
 spec:
   type: NodePort
   selector:
@@ -445,7 +447,9 @@ spec:
                 shutil.copy(manifest_path, os.path.join('static', 'generated', os.path.basename(manifest_path)))
 
                 # 🐳 Build, tag, login, and push image to Docker Hub
-                full_image = f"{DOCKERHUB_USERNAME}/{image_name}:latest"
+                timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M")
+                tagged_image_name = f"{image_name}:{timestamp}"
+                full_image = f"{DOCKERHUB_USERNAME}/{tagged_image_name}"
 
                 try:
                     print(f"👉 Building Docker image: {full_image}")
